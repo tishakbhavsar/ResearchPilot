@@ -1,0 +1,6 @@
+openai>=1.0.0          # Grok uses OpenAI-compatible SDK
+google-generativeai    # Gemini (optional swap)
+requests               # Semantic Scholar + ArXiv API calls
+pymupdf                # PDF text extraction (import as fitz)
+python-dotenv          # load API keys from .env file
+streamlit              # optional UI (not graded)
