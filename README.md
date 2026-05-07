@@ -1,100 +1,109 @@
 # ResearchPilot — Automated Literature Review Agent
 
-A multi-step LLM agent that takes a plain-English research topic and produces a
-fully cited, critically argued literature review — in one run.
+ResearchPilot is a compact multi-step agent that converts a plain-English
+research topic into a concise, cited literature brief. It combines tool-based
+paper discovery with small, focused LLM calls and deterministic assembly to
+produce a fast, reliable Top-10 research brief suitable for quick surveys.
 
-## What it does
+## Quick start
 
+1) Configure for GROK (edit `config.py` or use env vars)
+
+In `config.py` set the provider and ensure the key is available from the
+environment (recommended):
+
+```python
+LLM_PROVIDER = "grok"
+# prefer environment variables for secrets
+GROK_API_KEY = os.environ.get("GROK_API_KEY")
 ```
-User query → Step 1 (LLM) → Step 2 (Tool) → Step 3 (LLM) →
-Step 4 (Tool+LLM) → Step 5 (LLM) → [You confirm] → Step 6 (LLM) → lit_review.md
+
+Or set the environment variable in your shell:
+
+```bash
+export GROK_API_KEY="your-grok-api-key"
 ```
 
-| Step | Type | What it does |
-|------|------|-------------|
-| 1 | LLM | Parse query → keywords, subtopics, search strings |
-| 2 | Tool | Semantic Scholar API → 30–50 papers, scored & ranked |
-| 3 | LLM | Select top 5 papers + profile notable researchers |
-| 4 | Tool+LLM | Fetch ArXiv PDFs → critical reading per paper |
-| 5 | LLM | Cross-paper synthesis: agreements, contradictions, gaps |
-| Gate | You | Confirm or add focus note |
-| 6 | LLM | Write full cited Markdown literature review |
+2) Run from the terminal
 
-## Installation
+```bash
+# Run interactively (uses provider from config.py)
+python main.py
+
+# Run with a query (uses config provider or override)
+python main.py "attention mechanisms in transformer models"
+
+# Force use of Grok for a single run
+python main.py --provider grok "federated learning for healthcare"
+
+# Force use of Gemini for a single run
+python main.py --provider gemini "your query"
+```
+
+3) Run with Streamlit UI
+
+Install dependencies and run the web UI:
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Configuration
-
-Edit `config.py` — set your API key and provider:
-
-```python
-LLM_PROVIDER = "grok"        # or "gemini"
-GROK_API_KEY = "your-key"    # from https://console.x.ai/
-```
-
-Or use environment variables:
-```bash
-export GROK_API_KEY="your-key"
-```
-
-## Running
-
-```bash
-# Interactive mode
-python main.py
-
-# Query as argument
-python main.py "attention mechanisms in transformer models"
-python main.py "federated learning for privacy-preserving healthcare AI"
-
-# Streamlit UI
 streamlit run app.py
 ```
 
-Output is saved to `output/lit_review.md`.
+The Streamlit UI lets you pick the provider (`mock`, `grok`, `gemini`) and
+toggle mock fallback behavior.
 
-In the Streamlit app, you can choose `mock`, `gemini`, or `grok`, and toggle fallback to the mock provider when an API request fails.
+## How it works (steps & outputs)
 
-## Chain dependency structure
+The pipeline is linear — each step augments a shared `state` dict and feeds
+the next stage. Output is written to `output/lit_review.md` and `state`.
 
-Each step **cannot be removed** without breaking the chain:
+- Step 1 — `step1_parse.py` (LLM): parse the user query into
+    `keywords`, `subtopics`, and `search_strings`. Output: structured search terms.
+- Step 2 — `step2_fetch.py` (Tool): query Semantic Scholar (and OpenAlex as
+    fallback), fetch ~30–50 candidate papers, compute a suitability score, and
+    profile notable authors. Output: `papers` and scored candidates.
+- Step 3 — `step3_relevance.py` (LLM/heuristic): select Top-10 papers and
+    assemble `notable_researchers`. Output: `top_papers` and researcher list.
+- Step 4 — `step4_deepread.py` (Tool + minimal LLM): fetch abstracts (PDFs
+    when available), extract core arguments, key findings, and limitations for
+    each Top-10 paper. Output: `deep_reads` (per-paper summaries).
+- Step 5 — `step5_synthesise.py` (LLM): cross-paper synthesis to produce
+    `agreements`, `contradictions`, `clusters`, and `gaps`. A sanitizer + repair
+    pass is used to handle truncated responses; when parsing fails, a
+    deterministic fallback extracts topics from `deep_reads`.
+- Step 6 — `step6_report.py` (deterministic + small LLM call): assemble the
+    final brief — ranked table, one-line summaries, themes, a short
+    `Mini Discussion` (agreements/contradictions), and `Mini Critical Gaps`
+    (actionable items). Output: `output/lit_review.md` (Markdown brief).
 
-- **Step 2** cannot run without Step 1's `search_strings`
-- **Step 3** cannot run without Step 2's `papers` and `authors`
-- **Step 4** cannot run without Step 3's `top_papers` (exactly 5 papers to read)
-- **Step 5** cannot run without Step 4's `deep_reads` (needs per-paper analyses to synthesise)
-- **Step 6** cannot run without Step 5's `synthesis` (needs clusters, contradictions, gaps for structure)
+Typical runtime (normal mode) is configurable; with abstract-only Top-10 it
+commonly runs in ~30–120s depending on network and caching.
 
-## Project structure
+## Output format
 
-```
-researchpilot/
-├── main.py                  ← orchestrates the full chain (read this first)
-├── config.py                ← API keys + provider (only file to edit)
-├── requirements.txt
-├── README.md
-├── steps/
-│   ├── step1_parse.py       ← LLM: extract query structure
-│   ├── step2_fetch.py       ← TOOL: Semantic Scholar API + scoring
-│   ├── step3_relevance.py   ← LLM: select top 5 + researcher profiles
-│   ├── step4_deepread.py    ← TOOL: ArXiv PDF fetch + LLM critical read
-│   ├── step5_synthesise.py  ← LLM: cross-paper synthesis
-│   └── step6_report.py      ← LLM: write final cited report
-├── utils/
-│   ├── llm_client.py        ← single LLM call function (Grok or Gemini)
-│   ├── semantic_scholar.py  ← all S2 API calls
-│   ├── arxiv_client.py      ← PDF fetch + text extraction
-│   ├── scorer.py            ← suitability score formula (pure Python)
-│   └── writer.py            ← saves output/lit_review.md
-└── output/
-    └── lit_review.md        ← generated report
-```
+The generated `output/lit_review.md` contains:
 
-## Error handling
+- Header with topic, field, and date
+- Top-10 ranked table (suitability score, authors, year, venue)
+- Key researchers
+- One-line paper summaries (from abstracts)
+- Broad themes (clusters)
+- Mini Discussion (concise agreements + contradictions)
+- Navigation guide (which papers to read first for each theme)
+- Critical gaps & Mini Critical Gaps (actionable next steps)
 
-- **Step 2 (S2 API)**: rate limit retries with backoff; if all searches fail, pipeline continues with empty papers list
-- **Step 4 (ArXiv PDF)**: per-paper try/except; falls back to abstract silently
-- **Step 1/3/5 JSON parsing**: regex fallback to extract JSON from prose-wrapped responses
+## Troubleshooting & notes
+
+- If LLM calls fail or truncate, the pipeline attempts a repair pass and
+    deterministic fallbacks so the final brief still generates.
+- To reduce runtime, use abstract-only reading (current default) and enable
+    caching for Semantic Scholar results (`.s2_cache`).
+
+## Credits & external tools
+
+- Google Gemini: https://developers.generativeai.google/
+- Grok (x.ai): https://x.ai/
+- Claude (Anthropic) — used as a design reference: https://www.anthropic.com/
+
+If you'd like, I can also add a short example `config.py` snippet for GROK
+and an example `requirements.txt` fragment next.
