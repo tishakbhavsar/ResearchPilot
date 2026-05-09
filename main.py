@@ -29,6 +29,7 @@ from steps.step4_deepread import deep_read
 from steps.step5_synthesise import synthesise_critique
 from steps.step6_report import write_lit_review
 from utils.writer import save_report
+from utils.step_logger import StepLogger, extract_step_input, extract_step_output
 
 BANNER = """
 ╔══════════════════════════════════════════════════════════════╗
@@ -152,6 +153,7 @@ def main():
     }
 
     pipeline_start = time.time()
+    logger = StepLogger()  # Initialize structured logger
 
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 1 — LLM: Parse query into structured research parameters
@@ -163,7 +165,10 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     print_step_header(1, "Parsing research query", "LLM")
     print("  Extracting: keywords, subtopics, field, time_range, search_strings…")
+    step1_in = extract_step_input(state, 1)
     state = parse_query(state)
+    step1_out = extract_step_output(state, 1)
+    logger.log_step(1, "Query Parsing", step1_in, step1_out)
     print_step_result({
         "topic":          state["topic"],
         "field":          state["field"],
@@ -181,7 +186,10 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     print_step_header(2, "Fetching papers from Semantic Scholar", "TOOL")
     print(f"  Using {len(state['search_strings'])} search strings → target 30–50 papers…")
+    step2_in = extract_step_input(state, 2)
     state = fetch_and_rank(state)
+    step2_out = extract_step_output(state, 2)
+    logger.log_step(2, "Paper Fetching & Ranking", step2_in, step2_out)
     print_step_result({
         "papers fetched & scored": state["papers"],
         "author profiles":         state["authors"],
@@ -203,7 +211,10 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     print_step_header(3, "Selecting top 10 papers + profiling researchers", "TOOL")
     print("  Using suitability score ranking + author profiles for Top 10…")
+    step3_in = extract_step_input(state, 3)
     state = assess_relevance(state)
+    step3_out = extract_step_output(state, 3)
+    logger.log_step(3, "Relevance Assessment & Researcher Profiling", step3_in, step3_out)
     print_step_result({
         "top_papers": [p.get("title", "?")[:60] for p in state["top_papers"]],
         "notable_researchers": [r.get("name", "?") for r in state["notable_researchers"]],
@@ -217,7 +228,10 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     print_step_header(4, "Reading abstracts for Top 10 papers", "TOOL")
     print("  Abstract-only processing (no PDF dependency)…")
+    step4_in = extract_step_input(state, 4)
     state = deep_read(state)
+    step4_out = extract_step_output(state, 4)
+    logger.log_step(4, "Deep Reading (Abstract Analysis)", step4_in, step4_out)
     print_step_result({
         "deep_reads completed": len(state["deep_reads"]),
     })
@@ -234,7 +248,10 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     print_step_header(5, "Synthesising agreements, contradictions & gaps", "LLM")
     print("  Comparing deep-reads cross-paper…")
+    step5_in = extract_step_input(state, 5)
     state = synthesise_critique(state)
+    step5_out = extract_step_output(state, 5)
+    logger.log_step(5, "Cross-Paper Synthesis", step5_in, step5_out)
     s = state["synthesis"]
     print_step_result({
         "agreements":     s.get("agreements", []),
@@ -293,10 +310,14 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     print_step_header(6, "Writing final research brief", "TOOL")
     print("  Generating ranked summary, themes, navigation, and critical gaps…")
+    step6_in = extract_step_input(state, 6)
     state = write_lit_review(state)
+    step6_out = extract_step_output(state, 6)
+    logger.log_step(6, "Final Report Generation", step6_in, step6_out)
 
     # ── Save to disk ───────────────────────────────────────────────────────────
     output_path = save_report(state["report_markdown"])
+    logger.log_final_summary(state)
 
     elapsed = time.time() - pipeline_start
     print(f"\n{'═' * 60}")

@@ -231,30 +231,67 @@ def _fallback_contradictions(deep_reads: list[dict]) -> list[str]:
 
 
 def _fallback_gaps(deep_reads: list[dict]) -> list[str]:
+    """
+    Extract research gaps from paper limitations.
+    
+    Strategy:
+    1. Collect explicit limitations from all papers
+    2. Group by theme (e.g., "generalization", "evaluation", "implementation")
+    3. Aggregate into actionable research questions
+    4. Fallback to domain-specific gaps if insufficient extracted
+    """
     from collections import Counter
     gap_cands = []
-    # collect explicit limitations
+    
+    # ── Extract all paper-specific limitations ──────────────────────────────────
     for dr in deep_reads:
         for lim in dr.get("limitations", [])[:2]:
             s = str(lim).strip()
-            if s:
+            if s and len(s) > 15:
                 gap_cands.append(s)
-    # also look for missing items in core arguments/titles
-    for dr in deep_reads:
-        core = dr.get("core_argument", "").lower()
-        if core and ("external" in core or "validation" in core):
-            gap_cands.append("External validation is limited or absent in several studies.")
-
-    counts = Counter(gap_cands)
-    unique = [t for t, _ in counts.most_common(6)]
-    # common generic gaps if none extracted
-    if not unique:
-        unique = [
-            "No consensus benchmark protocol is consistently used across studies, limiting direct comparability.",
-            "Computational cost and reproducibility details are often underreported in abstract-level evidence.",
-            "Cross-domain and low-resource generalization claims are not consistently validated on shared datasets.",
-        ]
-    return unique[:6]
+    
+    # ── Aggregate limitations into themes ──────────────────────────────────────
+    if gap_cands:
+        themes = {
+            "generalization": [],
+            "evaluation": [],
+            "implementation": [],
+            "theory": [],
+            "other": []
+        }
+        
+        for gap in gap_cands:
+            gap_lower = gap.lower()
+            if any(w in gap_lower for w in ["generalization", "domain", "cross-", "transfer", "scope"]):
+                themes["generalization"].append(gap)
+            elif any(w in gap_lower for w in ["evaluation", "benchmark", "dataset", "validation"]):
+                themes["evaluation"].append(gap)
+            elif any(w in gap_lower for w in ["implementation", "reproducibility", "detail", "code", "computational"]):
+                themes["implementation"].append(gap)
+            elif any(w in gap_lower for w in ["theory", "understanding", "explanation", "interpretation"]):
+                themes["theory"].append(gap)
+            else:
+                themes["other"].append(gap)
+        
+        # ── Synthesize one gap per theme ───────────────────────────────────────
+        synthesized = []
+        for theme, gaps in themes.items():
+            if gaps:
+                # Use most common gap in this theme (via Counter)
+                counts = Counter(gaps)
+                primary = counts.most_common(1)[0][0]
+                synthesized.append(primary)
+        
+        if synthesized:
+            return synthesized[:6]
+    
+    # ── Fallback: domain-aware generic gaps ────────────────────────────────────
+    # These are less generic than before, but still serve as safety net
+    return [
+        "Generalization across domains and datasets needs systematic evaluation on held-out test sets.",
+        "Computational efficiency and reproducibility details warrant further investigation in implementation.",
+        "Theoretical understanding of failure modes and boundary conditions remains an open research question.",
+    ]
 
 
 ### Small text helpers for fallback heuristics
