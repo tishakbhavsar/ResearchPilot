@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import io
 import os
+import threading
+import time
 from contextlib import redirect_stdout
 
 import streamlit as st
@@ -23,15 +25,35 @@ from steps.step6_report import write_lit_review
 from utils.writer import save_report
 
 
-def _capture_step(step_fn, state: dict, label: str) -> tuple[dict, str]:
-    """Run one pipeline step and capture its stdout for display in the UI."""
+def _stream_step(step_fn, state: dict, label: str, placeholder) -> tuple[dict, str]:
+    """Run a pipeline step in a background thread and stream stdout to Streamlit.
+
+    Returns the updated state and the captured logs.
+    """
     buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        state = step_fn(state)
-    logs = buffer.getvalue()
-    if logs:
-        print(f"[{label}]\n{logs}", end="")
-    return state, logs
+    result = {}
+
+    def target():
+        nonlocal result
+        with redirect_stdout(buffer):
+            result = step_fn(state)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+
+    last = ""
+    # Poll buffer and update placeholder while thread is running
+    while thread.is_alive():
+        time.sleep(0.15)
+        text = buffer.getvalue()
+        if text != last:
+            placeholder.code(f"[{label}]\n" + text, language="text")
+            last = text
+
+    thread.join()
+    full = buffer.getvalue()
+    placeholder.code(f"[{label}]\n" + full, language="text")
+    return result, full
 
 
 def run_pipeline(query: str, provider: str, focus_note: str) -> tuple[dict, str, str]:
@@ -140,37 +162,37 @@ def main() -> None:
 
             status.info("Step 1/6: parsing query")
             step_log.info("Running Step 1...")
-            state, logs = _capture_step(parse_query, state, "Step 1")
+            state, logs = _stream_step(parse_query, state, "Step 1", step_log)
             log_chunks.append(logs)
             step_log.code("".join(log_chunks) or "Step 1 finished.", language="text")
             progress.progress(15)
 
             status.info("Step 2/6: fetching and scoring papers")
-            state, logs = _capture_step(fetch_and_rank, state, "Step 2")
+            state, logs = _stream_step(fetch_and_rank, state, "Step 2", step_log)
             log_chunks.append(logs)
             step_log.code("".join(log_chunks) or "Step 2 finished.", language="text")
             progress.progress(35)
 
             status.info("Step 3/6: selecting top papers")
-            state, logs = _capture_step(assess_relevance, state, "Step 3")
+            state, logs = _stream_step(assess_relevance, state, "Step 3", step_log)
             log_chunks.append(logs)
             step_log.code("".join(log_chunks) or "Step 3 finished.", language="text")
             progress.progress(50)
 
             status.info("Step 4/6: deep reading papers")
-            state, logs = _capture_step(deep_read, state, "Step 4")
+            state, logs = _stream_step(deep_read, state, "Step 4", step_log)
             log_chunks.append(logs)
             step_log.code("".join(log_chunks) or "Step 4 finished.", language="text")
             progress.progress(70)
 
             status.info("Step 5/6: synthesising themes")
-            state, logs = _capture_step(synthesise_critique, state, "Step 5")
+            state, logs = _stream_step(synthesise_critique, state, "Step 5", step_log)
             log_chunks.append(logs)
             step_log.code("".join(log_chunks) or "Step 5 finished.", language="text")
             progress.progress(85)
 
             status.info("Step 6/6: writing report")
-            state, logs = _capture_step(write_lit_review, state, "Step 6")
+            state, logs = _stream_step(write_lit_review, state, "Step 6", step_log)
             log_chunks.append(logs)
             step_log.code("".join(log_chunks) or "Step 6 finished.", language="text")
 
