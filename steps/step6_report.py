@@ -100,8 +100,8 @@ def _build_brief(state: dict) -> str:
 
     # ── 2. Ranked table ────────────────────────────────────────────────────────
     lines += ["## Top 10 Papers Ranked by Suitability Score", ""]
-    lines.append("| Rank | Score | Paper | Authors | Year | Venue |")
-    lines.append("|------|-------|-------|---------|------|-------|")
+    lines.append("| Rank | Score | Citations | Paper | Authors | Year | Venue |")
+    lines.append("|------|-------|-----------|-------|---------|------|-------|")
 
     for i, dr in enumerate(deep_reads, 1):
         title_short = dr.get("title", "?")[:52]
@@ -111,8 +111,9 @@ def _build_brief(state: dict) -> str:
         authors_short = ", ".join(authors_list[:2])
         if len(authors_list) > 2:
             authors_short += " et al."
+        citations = dr.get("citations", 0)
         lines.append(
-            f"| {i} | {dr.get('score', 0):.2f} | {title_short} "
+            f"| {i} | {dr.get('score', 0):.2f} | {citations} | {title_short} "
             f"| {authors_short} | {dr.get('year','?')} "
             f"| {dr.get('venue','?')} |"
         )

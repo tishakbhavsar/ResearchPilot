@@ -34,14 +34,17 @@ Prompt design:
         rather than vague generalisations — and gives Step 6 citable specifics.
 """
 
-from prompts.step5_prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from utils.llm_client import call_llm
 
 # ── Main function ──────────────────────────────────────────────────────────────
 
 def synthesise_critique(state: dict) -> dict:
     """
-    LLM Step 5: Cross-paper synthesis — agreements, contradictions, gaps, clusters.
+    Step 5: Cross-paper synthesis — FOOLPROOF DESIGN.
+    
+    Deterministic extraction is PRIMARY (always succeeds).
+    Optional LLM call is SECONDARY (skipped if truncated).
+    Never fails on token limits or API issues — only on rate limits.
 
     Args:
         state: shared pipeline state dict
@@ -51,7 +54,6 @@ def synthesise_critique(state: dict) -> dict:
     """
     deep_reads = state["deep_reads"]
     topic      = state["topic"]
-    subtopics  = state.get("subtopics", [])
 
     if not deep_reads:
         print("  [WARN] Step 5: No deep reads to synthesise. Skipping.")
@@ -60,52 +62,20 @@ def synthesise_critique(state: dict) -> dict:
         }
         return state
 
-    # ── Build the deep-reads block for the prompt ──────────────────────────────
-    deep_reads_block = _format_deep_reads_block(deep_reads)
+    # ── STEP 1: Deterministic extraction (PRIMARY) — ALWAYS SUCCEEDS ──────────
+    print("  Using deterministic synthesis (no LLM dependency)…")
+    agreements = _fallback_agreements(deep_reads)
+    contradictions = _fallback_contradictions(deep_reads)
+    gaps = _fallback_gaps(deep_reads)
+    clusters = _fallback_clusters(deep_reads)
 
-    user_prompt = USER_PROMPT_TEMPLATE.format(
-        topic=topic,
-        deep_reads_block=deep_reads_block,
-    )
-
-    # ── Call LLM ──────────────────────────────────────────────────────────────
-    raw_response = call_llm(
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-        step_label="Step 5 — synthesise_critique",
-        max_tokens=1536,
-    )
-
-    # ── Parse response with fallback retry ─────────────────────────────────────
-    parsed = _safe_parse_json(raw_response)
+    # ── STEP 2: Optional LLM refinement (SECONDARY) ────────────────────────────
+    # Only processes top 3 papers, asks for clusters only (lightweight).
+    # If LLM truncates or fails, we still have deterministic clusters.
+    llm_clusters = _try_llm_clusters(topic, deep_reads[:3])
+    if llm_clusters:
+        clusters = llm_clusters
     
-    # Fallback retry with minimal prompt if parsing fails
-    if not isinstance(parsed, dict) or (not parsed.get("agreements") and not parsed.get("clusters")):
-        print(f"  [WARN] Step 5: First attempt failed. Retrying with minimal prompt…")
-        titles = [dr.get('title', '?')[:30] for dr in deep_reads[:3]]
-        minimal_user = f"Topic: {topic}\nPapers: {', '.join(titles)}\nReturn JSON: {{\"agreements\": [...], \"contradictions\": [...], \"gaps\": [...], \"clusters\": [...]}}"
-        retry_response = call_llm(
-            system_prompt="Return ONLY valid JSON for synthesis.",
-            user_prompt=minimal_user,
-            step_label="Step 5 — synthesise_critique (retry)",
-            max_tokens=768,
-        )
-        parsed = _safe_parse_json(retry_response)
-
-    clusters = _normalize_clusters(parsed.get("clusters", []))
-    agreements = _normalize_string_list(parsed.get("agreements", []), max_items=6)
-    contradictions = _normalize_string_list(parsed.get("contradictions", []), max_items=4)
-    gaps = _normalize_string_list(parsed.get("gaps", []), max_items=6)
-
-    if not clusters:
-        clusters = _fallback_clusters(deep_reads)
-    if not agreements:
-        agreements = _fallback_agreements(deep_reads)
-    if not contradictions:
-        contradictions = _fallback_contradictions(deep_reads)
-    if not gaps:
-        gaps = _fallback_gaps(deep_reads)
-
     state["synthesis"] = {
         "agreements": agreements,
         "contradictions": contradictions,
@@ -116,54 +86,44 @@ def synthesise_critique(state: dict) -> dict:
     return state
 
 
+def _try_llm_clusters(topic: str, top_papers: list[dict]) -> list[str]:
+    """
+    Optional LLM refinement to improve cluster labels.
+    Only processes top 3 papers to minimize truncation.
+    Returns empty list if LLM truncates or fails — caller falls back to deterministic.
+    """
+    if not top_papers:
+        return []
+    
+    # Build minimal prompt with only titles
+    paper_titles = "\n".join([f"- {dr.get('title', '?')[:60]}" for dr in top_papers])
+    minimal_prompt = f"Topic: {topic}\n\nTop papers:\n{paper_titles}\n\nReturn JSON: {{\"clusters\": [\"cluster1\", \"cluster2\", \"cluster3\"]}}"
+    
+    raw_response = call_llm(
+        system_prompt="Extract 2-3 research themes from paper titles. Return ONLY valid JSON.",
+        user_prompt=minimal_prompt,
+        step_label="Step 5 — optional_cluster_refinement",
+        max_tokens=256,
+    )
+    
+    # Check for truncation — if response is too short or empty, skip it
+    if not raw_response or len(raw_response) < 20:
+        return []
+    
+    # Parse with sanitizer
+    from utils.llm_sanitizer import extract_json_from_text
+    parsed = extract_json_from_text(raw_response)
+    
+    if not isinstance(parsed, dict):
+        return []
+    
+    clusters = _normalize_clusters(parsed.get("clusters", []))
+    return clusters if clusters else []
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _format_deep_reads_block(deep_reads: list) -> str:
-    """
-    Format all 5 deep-read dicts into a structured text block for the LLM.
-    Keeps each paper's section clear so the LLM can make cross-paper references.
-    """
-    sections = []
-    for i, dr in enumerate(deep_reads, 1):
-        findings_text = " | ".join(dr.get("key_findings", ["No findings extracted."])[:1])
-        limitations_text = " | ".join(dr.get("limitations", ["No limitations extracted."])[:1])
-        method_tag = dr.get("method_tag", "Unknown")
 
-        section = (
-            f"=== Paper {i}: {dr.get('title', 'Unknown')} ({dr.get('year', 'N/A')}) ===\n"
-            f"Core: {str(dr.get('core_argument', 'N/A'))[:140]}\n"
-            f"Method: {str(method_tag)[:100]}\n"
-            f"Findings: {findings_text[:180]}\n"
-            f"Limits: {limitations_text[:140]}\n"
-        )
-        sections.append(section)
-
-    return "\n\n".join(sections)
-
-
-def _safe_parse_json(text: str) -> dict:
-    """Robustly extract JSON from LLM response using sanitizer."""
-    from utils.llm_sanitizer import extract_json_from_text
-
-    raw = text or ""
-    parsed = extract_json_from_text(raw)
-    if isinstance(parsed, dict):
-        return parsed
-
-    # Save raw response for inspection
-    try:
-        import os, datetime
-        os.makedirs("logs", exist_ok=True)
-        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        fname = os.path.join("logs", f"llm_step5_raw_{ts}.txt")
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write(raw)
-        print(f"  [DEBUG] Step 5: Raw LLM response written to {fname}")
-    except Exception:
-        pass
-
-    print("  [WARN] Step 5: Could not parse JSON. Using empty synthesis.")
-    return {"agreements": [], "contradictions": [], "gaps": [], "clusters": []}
 
 
 def _normalize_string_list(value, max_items: int = 6) -> list[str]:
@@ -191,38 +151,141 @@ def _normalize_clusters(value) -> list[str]:
 
 
 def _fallback_clusters(deep_reads: list[dict]) -> list[str]:
-    tags = []
+    # Use method_tag and top title tokens to produce short cluster labels
+    from collections import Counter
+    toks = []
     for dr in deep_reads:
         tag = dr.get("method_tag", "")
         if isinstance(tag, str) and tag.strip():
-            tags.append(tag.strip().title())
-    unique = list(dict.fromkeys(tags))
-    return unique[:5] if unique else ["General Trends"]
+            toks.append(tag.strip().title())
+        # fallback to keywords from title
+        title = dr.get("title", "")
+        for w in _top_tokens(title, 3):
+            toks.append(w.title())
+    counts = Counter(toks)
+    if not counts:
+        return ["General Trends"]
+    labels = [t for t, _ in counts.most_common(5)]
+    return labels
 
 
 def _fallback_agreements(deep_reads: list[dict]) -> list[str]:
-    top = min(len(deep_reads), 10)
-    return [
-        f"Papers 1-{top} agree that improving reliability/factuality remains a central challenge in this topic.",
-        "Most papers prioritize evaluation quality and error analysis over purely scaling model size.",
-        "Abstract-level evidence suggests benchmark design strongly influences reported performance gains.",
-    ]
+    # Extract short assertions from key_findings and first sentence of core_argument
+    from collections import Counter
+    cand = []
+    for dr in deep_reads:
+        for f in dr.get("key_findings", [])[:2]:
+            s = _short_normalize(f)
+            if s:
+                cand.append(s)
+        core = dr.get("core_argument", "")
+        if core:
+            first = core.split(".")[0]
+            s = _short_normalize(first)
+            if s:
+                cand.append(s)
+
+    counts = Counter(cand)
+    agreements = []
+    for phrase, cnt in counts.most_common(6):
+        if cnt >= 2:
+            agreements.append(f"{cnt} papers report that {phrase}.")
+    # if none found, fall back to generic high-level agreements
+    if not agreements:
+        return [
+            "Multiple papers report evaluation or benchmark-focused analyses as central to reported gains.",
+            "Several studies prioritize model evaluation and error analysis over simple scaling.",
+        ]
+    return agreements
 
 
 def _fallback_contradictions(deep_reads: list[dict]) -> list[str]:
-    if len(deep_reads) >= 2:
-        t1 = deep_reads[0].get("title", "Paper 1")[:40]
-        t2 = deep_reads[1].get("title", "Paper 2")[:40]
-        return [
-            f"Paper 1 ({t1}) emphasizes representation/modeling advances, while Paper 2 ({t2}) emphasizes evaluation or pipeline framing.",
-            "Several abstracts claim strong gains but differ on whether gains come from architecture choices or better data/benchmark setup.",
-        ]
-    return ["No explicit contradiction is reliably extractable from abstract-only evidence."]
+    # Find opposing polarity on same short predicate across papers
+    neg_words = set(["no", "not", "none", "failed", "insignificant", "no significant", "lack"])
+    pos_words = set(["improv", "increase", "decrease", "reduce", "benefit", "effective", "positive", "significant"])
+    preds = {}  # predicate -> list of (paper_idx, polarity, text)
+    for i, dr in enumerate(deep_reads, 1):
+        for f in dr.get("key_findings", [])[:2]:
+            text = f.lower()
+            pred = _predicate_from_text(text)
+            if not pred:
+                continue
+            polarity = "pos" if any(p in text for p in pos_words) and not any(n in text for n in neg_words) else ("neg" if any(n in text for n in neg_words) else "uncertain")
+            preds.setdefault(pred, []).append((i, polarity, dr.get("title", "Paper")[:40]))
+
+    contradictions = []
+    for pred, items in preds.items():
+        has_pos = any(p[1] == "pos" for p in items)
+        has_neg = any(p[1] == "neg" for p in items)
+        if has_pos and has_neg:
+            # pick one pos and one neg example
+            pos_ex = next((p for p in items if p[1] == "pos"), items[0])
+            neg_ex = next((p for p in items if p[1] == "neg"), items[0])
+            contradictions.append(f"Paper {pos_ex[0]} ({pos_ex[2]}) reports {pred}, while Paper {neg_ex[0]} ({neg_ex[2]}) reports no significant {pred}.")
+        if len(contradictions) >= 4:
+            break
+
+    if not contradictions:
+        return ["No explicit contradiction is reliably extractable from abstract-only evidence."]
+    return contradictions
 
 
 def _fallback_gaps(deep_reads: list[dict]) -> list[str]:
-    return [
-        "No consensus benchmark protocol is consistently used across studies, limiting direct comparability.",
-        "Computational cost and reproducibility details are often underreported in abstract-level evidence.",
-        "Cross-domain and low-resource generalization claims are not consistently validated on shared datasets.",
-    ]
+    from collections import Counter
+    gap_cands = []
+    # collect explicit limitations
+    for dr in deep_reads:
+        for lim in dr.get("limitations", [])[:2]:
+            s = str(lim).strip()
+            if s:
+                gap_cands.append(s)
+    # also look for missing items in core arguments/titles
+    for dr in deep_reads:
+        core = dr.get("core_argument", "").lower()
+        if core and ("external" in core or "validation" in core):
+            gap_cands.append("External validation is limited or absent in several studies.")
+
+    counts = Counter(gap_cands)
+    unique = [t for t, _ in counts.most_common(6)]
+    # common generic gaps if none extracted
+    if not unique:
+        unique = [
+            "No consensus benchmark protocol is consistently used across studies, limiting direct comparability.",
+            "Computational cost and reproducibility details are often underreported in abstract-level evidence.",
+            "Cross-domain and low-resource generalization claims are not consistently validated on shared datasets.",
+        ]
+    return unique[:6]
+
+
+### Small text helpers for fallback heuristics
+def _short_normalize(text: str) -> str:
+    import re
+    if not text:
+        return ""
+    s = text.strip()
+    s = re.sub(r"\s+", " ", s)
+    # remove trailing punctuation
+    s = s.rstrip('. ,;:')
+    return s
+
+
+def _top_tokens(text: str, n: int = 3) -> list[str]:
+    import re
+    if not text:
+        return []
+    words = re.findall(r"\w+", text.lower())
+    stop = set(["the","and","of","in","for","with","a","an","to","on","by","using"]) 
+    toks = [w for w in words if w not in stop]
+    from collections import Counter
+    return [t for t, _ in Counter(toks).most_common(n)]
+
+
+def _predicate_from_text(text: str) -> str:
+    # crude predicate extraction: look for verb+noun phrases like 'improve accuracy' or 'increase auc'
+    import re
+    m = re.search(r"(improv\w+|increase|decrease|reduce|no significant|fail\w*?)\s+([a-z_\-]{3,20})", text)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    # fallback to top token pair
+    toks = _top_tokens(text, 2)
+    return " ".join(toks) if toks else ""
